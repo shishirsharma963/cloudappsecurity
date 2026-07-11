@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="100%" height="100%">
+  <defs>
+    <!-- Background styling and gradients -->
+    <style>
+      .bg { fill: #0b0f19; }
+      .border { stroke: #1f2937; stroke-width: 2; fill: none; }
+      .title { font-family: 'Inter', system-ui, sans-serif; font-weight: 700; font-size: 20px; fill: #f9fafb; }
+      .subtitle { font-family: 'Inter', system-ui, sans-serif; font-size: 13px; fill: #9ca3af; }
+      .box { fill: #111827; stroke: #374151; stroke-width: 1.5; rx: 6px; }
+      .box-highlight { fill: #111827; stroke: #10b981; stroke-width: 2; rx: 6px; }
+      .box-auth { fill: #111827; stroke: #8b5cf6; stroke-width: 2; rx: 6px; }
+      .label { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; font-size: 13px; fill: #f3f4f6; text-anchor: middle; }
+      .sublabel { font-family: 'Inter', system-ui, sans-serif; font-size: 11px; fill: #9ca3af; text-anchor: middle; }
+      .arrow { stroke: #4b5563; stroke-width: 2; fill: none; stroke-dasharray: none; }
+      .arrow-flow { stroke: #10b981; stroke-width: 2; fill: none; }
+      .arrow-auth { stroke: #8b5cf6; stroke-width: 2; fill: none; stroke-dasharray: 4 4; }
+      .boundary { stroke: #f59e0b; stroke-width: 1.5; stroke-dasharray: 6 4; fill: none; }
+      .boundary-text { font-family: 'Inter', system-ui, sans-serif; font-size: 11px; font-weight: 600; fill: #f59e0b; }
+    </style>
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4b5563" />
+    </marker>
+    <marker id="arrowhead-flow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981" />
+    </marker>
+    <marker id="arrowhead-auth" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8b5cf6" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="960" height="540" />
+  <rect class="border" x="10" y="10" width="940" height="520" rx="8" />
+
+  <!-- Title -->
+  <text x="40" y="50" class="title">Securing a Multi-Tenant Cloud Application on AWS</text>
+  <text x="40" y="72" class="subtitle">Data Flow, Trust Boundaries, and Security Controls Placement</text>
+
+  <!-- TRUST BOUNDARIES -->
+  <!-- Internet Boundary -->
+  <path d="M 180 90 L 180 500" class="boundary" />
+  <text x="190" y="110" class="boundary-text">HOSTILE CLIENT BOUNDARY (UNTRUSTED)</text>
+
+  <!-- Database Boundary -->
+  <path d="M 690 90 L 690 500" class="boundary" />
+  <text x="700" y="110" class="boundary-text">PRIVATE DATA PLANE</text>
+
+  <!-- COMPUTATION PLACES -->
+  <!-- Client Node -->
+  <g transform="translate(40, 220)">
+    <rect class="box" x="0" y="0" width="100" height="70" />
+    <text x="50" y="30" class="label">iOS Client</text>
+    <text x="50" y="48" class="sublabel">Hostile / Untrusted</text>
+    <text x="50" y="60" class="sublabel">OIDC / JWT Flow</text>
+  </g>
+
+  <!-- AWS WAF / Edge -->
+  <g transform="translate(210, 220)">
+    <rect class="box" x="0" y="0" width="110" height="70" />
+    <text x="55" y="30" class="label">AWS Edge</text>
+    <text x="55" y="48" class="sublabel">CloudFront + WAF</text>
+    <text x="55" y="60" class="sublabel">Rate Limits / Injection</text>
+  </g>
+
+  <!-- API Gateway -->
+  <g transform="translate(360, 220)">
+    <rect class="box-auth" x="0" y="0" width="120" height="70" />
+    <text x="60" y="26" class="label">API Gateway</text>
+    <text x="60" y="44" class="sublabel" fill="#a78bfa">Cognito AuthN Gate</text>
+    <text x="60" y="58" class="sublabel" fill="#a78bfa">Asymmetric Verify</text>
+  </g>
+
+  <!-- Application Compute (Lambda / ECS) -->
+  <g transform="translate(520, 220)">
+    <rect class="box-highlight" x="0" y="0" width="130" height="85" />
+    <text x="65" y="24" class="label">App Services</text>
+    <text x="65" y="42" class="sublabel" fill="#34d399">Tenant AuthZ Gate</text>
+    <text x="65" y="56" class="sublabel" fill="#34d399">BOLA Enforcement</text>
+    <text x="65" y="72" class="sublabel" fill="#34d399">Idempotent Import</text>
+  </g>
+
+  <!-- SQS Queue (Async Pipeline) -->
+  <g transform="translate(520, 360)">
+    <rect class="box" x="0" y="0" width="130" height="60" />
+    <text x="65" y="28" class="label">SQS Ingestion</text>
+    <text x="65" y="46" class="sublabel">Duplicate Deadletter</text>
+  </g>
+
+  <!-- Database Node -->
+  <g transform="translate(760, 220)">
+    <rect class="box-highlight" x="0" y="0" width="140" height="85" />
+    <text x="70" y="26" class="label">Aurora Postgres</text>
+    <text x="70" y="44" class="sublabel" fill="#34d399">SQL Tenant Binding</text>
+    <text x="70" y="58" class="sublabel" fill="#34d399">UNIQUE Constraints</text>
+    <text x="70" y="72" class="sublabel" fill="#34d399">Atomic Transactions</text>
+  </g>
+
+  <!-- S3 Storage -->
+  <g transform="translate(760, 360)">
+    <rect class="box" x="0" y="0" width="140" height="60" />
+    <text x="70" y="28" class="label">Amazon S3</text>
+    <text x="70" y="46" class="sublabel">Private / SSE-KMS</text>
+  </g>
+
+  <!-- Cognito User Pool -->
+  <g transform="translate(360, 100)">
+    <rect class="box" x="0" y="0" width="120" height="60" />
+    <text x="60" y="28" class="label">Cognito IDP</text>
+    <text x="60" y="46" class="sublabel">MFA / Password Policy</text>
+  </g>
+
+  <!-- Security Control Services (KMS & Secrets Manager) -->
+  <g transform="translate(525, 90)">
+    <rect class="box" x="0" y="0" width="120" height="65" />
+    <text x="60" y="24" class="label">KMS &amp; SM</text>
+    <text x="60" y="42" class="sublabel">Key Management</text>
+    <text x="60" y="54" class="sublabel">DB Secret Rotation</text>
+  </g>
+
+  <!-- FLOW PATHS (ARROWS) -->
+  <!-- Client to WAF -->
+  <path d="M 140 255 L 210 255" class="arrow-flow" marker-end="url(#arrowhead-flow)" />
+  <text x="175" y="245" font-family="Inter" font-size="10" fill="#34d399" text-anchor="middle">HTTPS</text>
+
+  <!-- WAF to Gateway -->
+  <path d="M 320 255 L 360 255" class="arrow-flow" marker-end="url(#arrowhead-flow)" />
+
+  <!-- Cognito Authentication Handshake -->
+  <path d="M 90 220 C 130 130, 280 130, 360 130" class="arrow-auth" marker-end="url(#arrowhead-auth)" />
+  <text x="210" y="130" font-family="Inter" font-size="10" fill="#a78bfa" text-anchor="middle">OAuth PKCE Token</text>
+
+  <!-- Gateway verifier checking Cognito JWT signature -->
+  <path d="M 420 220 L 420 160" class="arrow-auth" marker-end="url(#arrowhead-auth)" />
+  <text x="430" y="195" font-family="Inter" font-size="10" fill="#a78bfa" text-anchor="start">Verify Signature</text>
+
+  <!-- Gateway to Application (With Claims) -->
+  <path d="M 480 255 L 520 255" class="arrow-flow" marker-end="url(#arrowhead-flow)" />
+  <text x="500" y="245" font-family="Inter" font-size="10" fill="#34d399" text-anchor="middle">Claims</text>
+
+  <!-- Application to DB -->
+  <path d="M 650 255 L 760 255" class="arrow-flow" marker-end="url(#arrowhead-flow)" />
+  <text x="705" y="245" font-family="Inter" font-size="10" fill="#34d399" text-anchor="middle">Tenant Query</text>
+
+  <!-- Application to S3 -->
+  <path d="M 610 305 L 760 380" class="arrow" marker-end="url(#arrowhead)" />
+
+  <!-- Ingestion to SQS -->
+  <path d="M 585 305 L 585 360" class="arrow" marker-end="url(#arrowhead)" />
+  <text x="595" y="335" font-family="Inter" font-size="10" fill="#9ca3af" text-anchor="start">Retry / Sync</text>
+
+  <!-- SQS to App Worker -->
+  <path d="M 550 360 L 550 305" class="arrow" marker-end="url(#arrowhead)" />
+
+  <!-- App Decrypting with KMS & SM -->
+  <path d="M 585 220 L 585 155" class="arrow" marker-end="url(#arrowhead)" />
+
+  <!-- DETECTIVE & OBSERVABILITY COMPLIANCE PLANE (Bottom Grid) -->
+  <rect x="40" y="455" width="880" height="60" class="box" stroke="#4b5563" />
+  <text x="50" y="475" font-family="Inter" font-weight="700" font-size="12" fill="#e5e7eb">COMPLIANCE &amp; OBSERVABILITY PLANE</text>
+  
+  <text x="180" y="495" font-family="Inter" font-weight="600" font-size="11" fill="#f3f4f6" text-anchor="middle">CloudTrail</text>
+  <text x="180" y="508" font-family="Inter" font-size="9" fill="#9ca3af" text-anchor="middle">Management Audit</text>
+
+  <text x="360" y="495" font-family="Inter" font-weight="600" font-size="11" fill="#f3f4f6" text-anchor="middle">GuardDuty</text>
+  <text x="360" y="508" font-family="Inter" font-size="9" fill="#9ca3af" text-anchor="middle">Workload Threat Detect</text>
+
+  <text x="540" y="495" font-family="Inter" font-weight="600" font-size="11" fill="#f3f4f6" text-anchor="middle">Security Hub</text>
+  <text x="540" y="508" font-family="Inter" font-size="9" fill="#9ca3af" text-anchor="middle">CSPM Risk Scoring</text>
+
+  <text x="720" y="495" font-family="Inter" font-weight="600" font-size="11" fill="#f3f4f6" text-anchor="middle">CloudWatch Logs</text>
+  <text x="720" y="508" font-family="Inter" font-size="9" fill="#9ca3af" text-anchor="middle">Structured App Audit</text>
+
+  <text x="860" y="495" font-family="Inter" font-weight="600" font-size="11" fill="#10b981" text-anchor="middle">SOC 2 / NIST</text>
+  <text x="860" y="508" font-family="Inter" font-size="9" fill="#10b981" text-anchor="middle">Continuous Evidence</text>
+
+</svg>
