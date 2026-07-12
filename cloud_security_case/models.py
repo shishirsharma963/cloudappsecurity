@@ -32,9 +32,9 @@ class Run:
     distance_m: float
     duration_seconds: float
     occurred_at: str  # YYYY-MM-DD
+    created_at: datetime
     source_provider: str | None = None
     external_workout_id: str | None = None
-    created_at: datetime
 
 
 @dataclass

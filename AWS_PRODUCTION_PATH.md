@@ -12,6 +12,8 @@ This document bridges the local prototype mechanisms to their AWS-native equival
 | **Authentication Edge** | JWT signature, audience, and expiry validated in `CognitoProvider`. | **Amazon API Gateway** (v2 HTTP API) | API Gateway configured with a JWT Authorizer pointing to the Cognito User Pool issuer URL. Signature validated against Cognito JWKS (`/.well-known/jwks.json`). |
 | **Edge Protection** | Simulated rate limits and signature validations. | **AWS WAF v2** | Regional WAF associated with API Gateway stage. Rules: rate-limiting (aggregate key = IP), AWS Core Managed Rule Set. |
 | **Database Plane** | In-memory SQLite with constraints and transactions. | **Amazon Aurora PostgreSQL** (Serverless v2) | Database instances hosted in isolated private subnets. Master credentials managed via **AWS Secrets Manager** with automatic rotation. |
+| **Connection Pooling** | Single-process SQLite connections. | **Amazon RDS Proxy** | Multiplexes Lambda's high concurrency onto a bounded pooled connection set; authenticates with IAM and pulls DB credentials from Secrets Manager so app code never sees the password. App compute connects to the proxy endpoint, never the cluster directly. |
+| **Private Connectivity** | Not applicable (local process). | **VPC Interface/Gateway Endpoints (PrivateLink)** | Private subnets have no NAT/IGW route; workloads reach Secrets Manager, KMS, SQS, STS, EventBridge, CloudWatch Logs, and S3 over PrivateLink on the AWS backbone. Egress-controlled by construction. |
 | **Asynchronous Ingestion** | Local thread processing and SQLite checks. | **Amazon SQS + Lambda / ECS** | Ingest API writes raw payloads to SQS. SQS triggers Lambda Worker. Poison messages route to SQS Dead-Letter Queue (DLQ). |
 | **Encryption at Rest** | SQLite unencrypted storage in memory/disk. | **AWS Key Management Service (KMS)** | Aurora storage encrypted with Customer Managed Key. S3 buckets encrypted using S3 Bucket Keys with KMS SSE. |
 | **Telemetry & Log Scrubbing** | `audit.secure_log` recursively scrubs PII and writes JSON to database. | **Amazon CloudWatch Logs** | App compute writes JSON to stdout/stderr. CloudWatch log group associated with KMS key. Subscription filter triggers Lambda for real-time log scanning/masking. |
@@ -28,10 +30,12 @@ This document bridges the local prototype mechanisms to their AWS-native equival
 
 ### 2. Establishing the Database Network Boundary
 *   **Local:** SQLite connects to a local file or in-memory instance.
-*   **Production:** Deploy `infra/terraform/database.tf`.
-    1.  Create a VPC with private subnets across multiple Availability Zones.
+*   **Production:** Deploy `infra/terraform/database.tf` **and** `infra/terraform/networking.tf`.
+    1.  Create a VPC with private subnets across multiple Availability Zones, with an explicit route table carrying **no `0.0.0.0/0` route** (no NAT/IGW).
     2.  Provision an Aurora Serverless v2 PostgreSQL cluster. Disable public accessibility (`publicly_accessible = false`).
-    3.  Create a database security group allowing ingress on port 5432 *only* from the security group of the API compute tasks.
+    3.  Deploy **VPC Interface Endpoints (PrivateLink)** for Secrets Manager, KMS, SQS, STS, EventBridge, and CloudWatch Logs, plus a **Gateway Endpoint for S3** — otherwise private-subnet workloads cannot reach the AWS control plane and every SDK call hangs until timeout. A "private subnet" without PrivateLink is not a deployable architecture.
+    4.  Front the cluster with **RDS Proxy** (IAM auth, Secrets Manager integration). Application compute connects to the proxy, never the cluster endpoint, so a Lambda concurrency spike cannot exhaust `max_connections` and self-DoS the database.
+    5.  Scope the database security group to admit port 5432 *only* from the **RDS Proxy** security group (and the credential-rotation lambda). No egress rule on the DB SG = deny all outbound.
 
 ### 3. Implementing Tenant-Bound ORM Scope
 *   **Local:** Explicitly querying `id` and `user_id` in `authorization.py`.

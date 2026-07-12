@@ -41,25 +41,31 @@ resource "aws_db_subnet_group" "db_subnets" {
 # Strictly scoped Security Group for the Database
 resource "aws_security_group" "db_sg" {
   name        = "fitness-db-security-group-${var.environment}"
-  description = "Allows ingress from application service compute only"
+  description = "Allows ingress from RDS Proxy and rotation lambda only"
   vpc_id      = aws_vpc.app_vpc.id
 
-  # Allow ingress *only* from the application compute security group
+  # Application traffic reaches the cluster only via the RDS Proxy
   ingress {
-    description     = "PostgreSQL from App compute layer"
+    description     = "PostgreSQL from RDS Proxy"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.rds_proxy_sg.id]
+  }
+
+  # The credential rotation lambda connects directly to test new credentials
+  ingress {
+    description     = "PostgreSQL from rotation lambda (app compute SG)"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
     security_groups = [aws_security_group.app_compute_sg.id]
   }
 
-  egress {
-    description = "Deny all outbound from database by default"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # No egress block: with no egress rule, the SG denies all outbound.
+  # (The previous revision had a comment claiming "deny all outbound" above a
+  # rule that ALLOWED all outbound — a lie in code. The database initiates no
+  # connections; it needs none.)
 }
 
 # KMS Key for DB encryption at rest

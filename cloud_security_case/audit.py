@@ -13,16 +13,63 @@ import uuid
 JWT_REGEX = re.compile(r"ey[a-zA-Z0-9-_=]+\.[a-zA-Z0-9-_=]+\.?[a-zA-Z0-9-_.+/=]*")
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
-SENSITIVE_KEYS = {
-    "email",
-    "weight",
-    "waist",
-    "value",
-    "authorization",
-    "token",
-    "password",
-    "secret",
-}
+# ---------------------------------------------------------------------------
+# Classification-driven redaction
+#
+# A hardcoded exact-match key list is brittle: `weight` is caught while
+# `bodyFatPercentage`, `heartRateMax`, or `body_fat_pct` sail through the
+# moment a developer adds a new metric. Keys are therefore normalized
+# (lowercased, separators stripped, so camelCase / snake_case / kebab-case
+# all collapse to one token) and matched against *classification markers* by
+# substring. Unknown numeric values inside a health-context container are
+# redacted by default: the scrubber fails closed on data it cannot classify,
+# because the failure mode of over-redaction is a less useful log line, while
+# the failure mode of under-redaction is a PII breach in every log sink.
+# ---------------------------------------------------------------------------
+
+# Marker substrings matched against normalized keys.
+CREDENTIAL_MARKERS = (
+    "token", "secret", "password", "credential", "apikey",
+    "authorization", "jwt", "bearer", "privatekey",
+)
+CONTACT_MARKERS = ("email", "phone", "contact", "ssn", "passport", "birth")
+HEALTH_MARKERS = (
+    "weight", "waist", "bodyfat", "heartrate", "pulse", "hrv", "bmi",
+    "bloodpressure", "glucose", "vo2", "calorie", "bodymass", "menstrual",
+)
+# Exact normalized keys that are sensitive only as a whole word ("value" is
+# the generic body_metrics column; matching it as a substring would nuke
+# harmless keys like "value_type").
+EXACT_SENSITIVE_KEYS = ("value",)
+
+# Container keys that place their entire subtree in health context.
+HEALTH_CONTEXT_MARKERS = (
+    "biometric", "bodymetric", "health", "vitals", "measurement",
+    "wellness", "metrics",
+)
+# Numeric values under these normalized keys survive inside health context —
+# structural fields, not measurements.
+STRUCTURAL_NUMERIC_ALLOWLIST = (
+    "id", "count", "timestamp", "epoch", "version", "page", "offset",
+    "limit", "setnumber", "reps",
+)
+
+_NORMALIZE_RE = re.compile(r"[^a-z0-9]")
+
+
+def _normalize_key(key: str) -> str:
+    """Collapse camelCase / snake_case / kebab-case to one comparable token."""
+    return _NORMALIZE_RE.sub("", key.lower())
+
+
+def _key_is_sensitive(norm_key: str) -> bool:
+    if norm_key in EXACT_SENSITIVE_KEYS:
+        return True
+    return any(
+        marker in norm_key
+        for markers in (CREDENTIAL_MARKERS, CONTACT_MARKERS, HEALTH_MARKERS)
+        for marker in markers
+    )
 
 
 def redact_text(text: str) -> str:
@@ -34,31 +81,42 @@ def redact_text(text: str) -> str:
     return text
 
 
-def redact_structure(data: dict | list) -> dict | list:
-    """Recursively traverses dictionary or list structure, redacting sensitive keys and texts."""
+def _redact(data, in_health_context: bool, parent_key: str = ""):
     if isinstance(data, list):
-        return [
-            redact_structure(item)
-            if isinstance(item, (dict, list))
-            else (redact_text(item) if isinstance(item, str) else item)
-            for item in data
-        ]
+        return [_redact(item, in_health_context) for item in data]
 
-    if not isinstance(data, dict):
-        return data
+    if isinstance(data, dict):
+        cleaned = {}
+        for k, v in data.items():
+            norm = _normalize_key(k)
+            if _key_is_sensitive(norm):
+                cleaned[k] = "[REDACTED_SENSITIVE_DATA]"
+            else:
+                child_context = in_health_context or any(
+                    marker in norm for marker in HEALTH_CONTEXT_MARKERS
+                )
+                cleaned[k] = _redact(v, child_context, parent_key=norm)
+        return cleaned
 
-    cleaned = {}
-    for k, v in data.items():
-        k_lower = k.lower()
-        if k_lower in SENSITIVE_KEYS:
-            cleaned[k] = "[REDACTED_SENSITIVE_DATA]"
-        elif isinstance(v, (dict, list)):
-            cleaned[k] = redact_structure(v)
-        elif isinstance(v, str):
-            cleaned[k] = redact_text(v)
-        else:
-            cleaned[k] = v
-    return cleaned
+    if isinstance(data, str):
+        return redact_text(data)
+
+    # Fail-safe: an unclassified number inside a health-context subtree is
+    # assumed to be a body measurement unless its key is structural.
+    if (
+        in_health_context
+        and isinstance(data, (int, float))
+        and not isinstance(data, bool)
+        and parent_key not in STRUCTURAL_NUMERIC_ALLOWLIST
+    ):
+        return "[REDACTED_SENSITIVE_DATA]"
+
+    return data
+
+
+def redact_structure(data: dict | list) -> dict | list:
+    """Recursively redact sensitive keys, texts, and health-context numerics."""
+    return _redact(data, in_health_context=False)
 
 
 def insecure_log(
@@ -118,6 +176,9 @@ def secure_log(
     # Redact email from actor_id if it's formatted as one
     clean_actor = redact_text(actor_id) if actor_id else "anonymous"
     clean_detail = redact_structure(detail)
+    # Denial reasons are built from exception text and can echo user input
+    # (emails, tokens) — scrub them like any other free-text field.
+    clean_reason = redact_text(reason)
 
     cursor.execute(
         """
@@ -132,7 +193,7 @@ def secure_log(
             resource_id,
             action,
             decision,
-            reason,
+            clean_reason,
             json.dumps(clean_detail),
         ),
     )

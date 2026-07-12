@@ -49,6 +49,19 @@ Three distinct trust boundaries separate components:
 2.  **API Gateway Boundary:** The API Gateway acts as the outer authentication gate. It decrypts and verifies the asymmetric JWT signature, audience, and expiry before the request is allowed to call internal services.
 3.  **Application Tenant Boundary:** Internal application compute is responsible for tenant resource validation. Every query must bind both the resource ID and the user's OIDC ID. The database layer reinforces this boundary using unique indexes and transaction rollbacks.
 
+### Hierarchical (Nested) Authorization
+
+Tenant binding must follow the ownership chain to its **root**, not just the top-level route. Child entities (e.g. `workout_sets`) are deliberately normalized without their own `user_id`; ownership is derivable only through the parent workout. An endpoint that fetches a child directly by ID (`/sets/{id}`) therefore cannot bind a tenant unless it **joins to the parent and checks the parent's owner**. Protecting `/workouts/{id}` while leaving `/sets/{id}` unscoped is a nested BOLA. `authorization.secure_fetch_child` enforces this via the parent join; `insecure_fetch_child` is retained as the contrast. Denial messages never name the resource's actual owner (avoids an enumeration oracle).
+
+### Token Lifecycle & Revocation
+
+Stateless JWT validation (signature + `aud` + `exp`) is an availability and latency win, but it is a **trade-off, not a free win**: a stolen token is cryptographically valid until `exp`. The gateway cannot un-sign it. The prototype resolves this with a two-layer revocation model:
+
+1.  **Edge deny-list (`auth.RevocationList`):** consulted on every request *after* signature validation, keyed by `jti` (single token) or `sub` + `iat` cutoff (Cognito `GlobalSignOut` semantics — kill everything issued before the sign-out instant, honor post-reauth tokens). Tombstones self-expire at the token's original `exp` to stay bounded. In production this is a low-latency cache (ElastiCache/DynamoDB).
+2.  **Authoritative session gate (`containment.require_active_session`):** a server-side session row keyed by `jti`, checked per request.
+
+Both layers are driven by the **same** revocation event, so an automated containment action (Phase 3) kills a compromised token at the gateway *and* the app layer simultaneously. Short token TTLs (5–15 min) remain the backstop that bounds the deny-list's required coverage window.
+
 ---
 
 ## 3. Data Integrity & State Invariants
@@ -91,7 +104,7 @@ Every security action emits structured logs to a designated telemetry pipeline:
 [ App Action ] ──> [ Scrubber (PII Redactor) ] ──> [ Structured JSON Event ] ──> [ CloudWatch / Audit DB ]
 ```
 
-*   **Log Scrubbing:** The logging utility parses all detail dictionaries and redacts values matching email addresses, weight/waist metrics, or JWT signatures, mapping them to `[REDACTED_SENSITIVE_DATA]`.
+*   **Log Scrubbing:** The logging utility is **classification-driven, not an exact-match allowlist**. Keys are normalized (case- and separator-insensitive, so `bodyFatPercentage` and `body_fat_pct` collapse to one token) and matched against credential/contact/health markers. Unrecognized numerics inside a health-context container are **redacted by default (fail-closed)**; the `reason` and `actor_id` free-text fields are scrubbed for embedded emails/JWTs. All matched values map to `[REDACTED_SENSITIVE_DATA]` (or `[REDACTED_EMAIL]`/`[REDACTED_JWT]` for in-text matches).
 *   **Telemetry Structure:** Logs include:
     *   `timestamp`: ISO UTC time.
     *   `event_type`: Category of action.

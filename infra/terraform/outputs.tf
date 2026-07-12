@@ -17,3 +17,8 @@ output "database_kms_key_arn" {
   value       = aws_kms_key.db_key.arn
   description = "The Customer Managed Key ARN encrypting PostgreSQL storage."
 }
+
+output "rds_proxy_endpoint" {
+  value       = aws_db_proxy.postgres_proxy.endpoint
+  description = "Pooled connection endpoint application compute should use instead of the cluster endpoint."
+}

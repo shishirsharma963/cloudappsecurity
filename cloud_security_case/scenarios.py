@@ -5,7 +5,7 @@ Seeds an in-memory database and executes the security verification flows.
 
 import sqlite3
 from datetime import datetime
-from cloud_security_case import auth, authorization, database, imports, audit, detection
+from cloud_security_case import auth, authorization, containment, database, imports, audit, detection
 
 # Instantiate singletons for the provider and detector
 cognito = auth.CognitoProvider()
@@ -52,6 +52,22 @@ def seed_database(conn: sqlite3.Connection):
             datetime.now().isoformat(),
             "manual",
         ),
+    )
+
+    # Seed Workout Sets (child rows — ownership only derivable via the parent)
+    conn.execute(
+        """
+        INSERT INTO workout_sets (id, workout_id, exercise_name, set_number, weight_kg, reps, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("wst_alice_1", "wkt_alice_1", "Back Squat", 1, 120.0, 5, datetime.now().isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO workout_sets (id, workout_id, exercise_name, set_number, weight_kg, reps, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("wst_bob_1", "wkt_bob_1", "Sled Push", 1, 90.0, 10, datetime.now().isoformat()),
     )
 
 
@@ -437,3 +453,210 @@ def execute_attack_10_bulk_exfiltration() -> list:
             alerts.append(alert)
 
     return alerts
+
+
+def execute_flow_3_workload_identity() -> dict:
+    """Flow 3: Service-to-service calls verified via workload identity exchange.
+
+    The import worker attests to the broker (STS AssumeRole / SPIFFE style),
+    receives a short-lived scoped service token, and the internal API verifies
+    provenance. Contrast paths: an unregistered workload, a scope-escalation
+    attempt, and a stolen *user* token replayed on the service channel.
+    """
+    broker = auth.WorkloadIdentityBroker()
+    broker.register_workload(
+        "wearable-import-worker",
+        attestation_secret="platform-attest-import-worker",
+        scopes=["runs:write", "queue:consume"],
+    )
+
+    # Legit exchange and callee-side verification
+    service_token = broker.exchange_token(
+        "wearable-import-worker",
+        "platform-attest-import-worker",
+        audience="internal_runs_api",
+        requested_scopes=["runs:write"],
+    )
+    claims = broker.verify_service_call(
+        service_token, expected_audience="internal_runs_api", required_scope="runs:write"
+    )
+    legit = f"VERIFIED provenance: {claims['sub']} (scope: {claims['scope']})"
+
+    # Attack A: unregistered workload requests a token
+    try:
+        broker.exchange_token(
+            "rogue-cryptominer",
+            "guessed-secret",
+            audience="internal_runs_api",
+            requested_scopes=["runs:write"],
+        )
+        unregistered = "ALLOWED"
+    except auth.WorkloadIdentityError as e:
+        unregistered = f"DENIED: {e}"
+
+    # Attack B: registered workload tries to escalate beyond its granted scopes
+    try:
+        broker.exchange_token(
+            "wearable-import-worker",
+            "platform-attest-import-worker",
+            audience="internal_runs_api",
+            requested_scopes=["runs:write", "users:delete"],
+        )
+        escalation = "ALLOWED"
+    except auth.WorkloadIdentityError as e:
+        escalation = f"DENIED: {e}"
+
+    # Attack C: a stolen mobile *user* token is replayed on the service channel
+    user_token = cognito.mint_token(
+        user_id="usr_alice",
+        email="alice@gmail.com",
+        client_id="client_mobile_app",
+        audience="internal_runs_api",
+    )
+    try:
+        broker.verify_service_call(
+            user_token, expected_audience="internal_runs_api", required_scope="runs:write"
+        )
+        confused_deputy = "ALLOWED"
+    except auth.WorkloadIdentityError as e:
+        confused_deputy = f"DENIED: {e}"
+
+    return {
+        "legit": legit,
+        "unregistered": unregistered,
+        "escalation": escalation,
+        "confused_deputy": confused_deputy,
+    }
+
+
+def execute_flow_4_policy_engine(conn: sqlite3.Connection) -> dict:
+    """Flow 4: Authorization decided by an OPA-style policy engine.
+
+    The service builds a structured input document and enforces the engine's
+    decision instead of hand-rolled conditionals. Shows an owner allow, a
+    cross-tenant default-deny, and the structured decision object for audit.
+    """
+    engine = authorization.PolicyEngine()
+
+    # Owner read: allowed by the 'owner-full-access' policy
+    claims_alice = {"sub": "usr_alice", "email": "alice@gmail.com"}
+    allowed = authorization.policy_fetch(
+        conn, claims_alice, "workouts", "wkt_alice_1", action="read", engine=engine
+    )
+
+    # Cross-tenant read: no policy matches -> Rego-style default deny
+    try:
+        authorization.policy_fetch(
+            conn, claims_alice, "workouts", "wkt_bob_1", action="read", engine=engine
+        )
+        denied = "ALLOWED"
+    except authorization.AuthorizationError as e:
+        denied = f"DENIED: {e}"
+
+    # Cross-tenant delete: matches the explicit 'deny-cross-tenant-write' policy
+    try:
+        authorization.policy_fetch(
+            conn, claims_alice, "workouts", "wkt_bob_1", action="delete", engine=engine
+        )
+        denied_write = "ALLOWED"
+    except authorization.AuthorizationError as e:
+        denied_write = f"DENIED: {e}"
+
+    return {
+        "allowed_decision": allowed["decision"],
+        "denied_read": denied,
+        "denied_write": denied_write,
+    }
+
+
+def execute_attack_11_containment(conn: sqlite3.Connection) -> dict:
+    """Attack 11: Automated incident response containment.
+
+    The anomaly engine detects bulk exfiltration and fires a containment hook
+    that revokes the user's active sessions AND tombstones the subject on the
+    edge deny-list. The attacker's still-valid JWT is then rejected at both
+    layers: the gateway verify step and the app-layer session gate.
+    """
+    # Wire a dedicated detector with the containment hook (EventBridge -> Lambda analogue)
+    deny_list = auth.RevocationList()
+    ir_detector = detection.AnomalyDetector(
+        alert_hooks=[containment.build_containment_hook(conn, revocation_list=deny_list)]
+    )
+
+    # Alice's account is compromised; the attacker logs in and a session is recorded
+    token = cognito.mint_token(
+        user_id="usr_alice",
+        email="alice@gmail.com",
+        client_id="client_mobile_app",
+        audience="fitness_api",
+    )
+    claims = cognito.verify_token(token, expected_audience="fitness_api", revocation_list=deny_list)
+    containment.create_session(conn, user_id="usr_alice", token_jti=claims["jti"])
+
+    # Before containment: the session gate passes
+    containment.require_active_session(conn, claims)
+    pre_status = "ALLOWED (token valid, session active)"
+
+    # Attacker bulk-exports data; the 5th read in the window trips the alert
+    alert = None
+    for _ in range(6):
+        result = ir_detector.log_event("usr_alice", allowed=True)
+        if result:
+            alert = result
+            break  # containment fired; the session is already dead
+
+    # After containment layer 1: the gateway deny-list rejects the token outright
+    try:
+        cognito.verify_token(token, expected_audience="fitness_api", revocation_list=deny_list)
+        gateway_status = "ALLOWED"
+    except auth.TokenRevokedError as e:
+        gateway_status = f"DENIED: {e}"
+
+    # After containment layer 2: even past the gateway, the session gate blocks
+    try:
+        containment.require_active_session(conn, claims)
+        post_status = "ALLOWED"
+    except containment.SessionRevokedError as e:
+        post_status = f"DENIED: {e}"
+
+    return {
+        "pre_status": pre_status,
+        "alert": alert,
+        "gateway_status": gateway_status,
+        "post_status": post_status,
+    }
+
+
+def execute_attack_12_nested_bola(conn: sqlite3.Connection) -> dict:
+    """Attack 12: Nested BOLA — the parent is protected, the child is probed.
+
+    Alice is blocked from /workouts/wkt_bob_1, so she requests the child
+    directly: /sets/wst_bob_1. The child row has no user_id column; only a
+    join to the parent's owner can authorize it.
+    """
+    token = cognito.mint_token(
+        user_id="usr_alice",
+        email="alice@gmail.com",
+        client_id="client_mobile_app",
+        audience="fitness_api",
+    )
+    claims = cognito.verify_token(token, expected_audience="fitness_api")
+
+    # Vulnerable child endpoint: fetch by ID only — leaks Bob's set
+    insecure_result = authorization.insecure_fetch_child(conn, "workout_sets", "wst_bob_1")
+
+    # Hardened child endpoint: ownership derived through the parent join
+    try:
+        authorization.secure_fetch_child(conn, claims, "workout_sets", "wst_bob_1")
+        secure_error = "ALLOWED"
+    except authorization.AuthorizationError as e:
+        secure_error = f"DENIED: {e}"
+
+    # Owner path still works
+    own_set = authorization.secure_fetch_child(conn, claims, "workout_sets", "wst_alice_1")
+
+    return {
+        "insecure_result": insecure_result,
+        "secure_error": secure_error,
+        "own_set": own_set,
+    }

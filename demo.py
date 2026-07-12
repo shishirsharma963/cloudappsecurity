@@ -5,6 +5,8 @@ Contrasts insecure vs secure designs, demonstrates BOLA/IDOR blocking, JWT check
 idempotent import flows, transaction rollbacks, log redactions, and exfiltration alerts.
 """
 
+import argparse
+import json
 import sys
 import os
 import sqlite3
@@ -34,14 +36,58 @@ def item_good(label: str, val: str):
     print(f"  HARDENED   (GOOD) | {label:24}: {val}")
 
 
+def print_audit_log(conn: sqlite3.Connection):
+    """Visualize the queryable audit_logs table as it is actually stored.
+
+    Shows the compliance reviewer's view: structured rows with sensitive
+    values already replaced by [REDACTED_*] markers at write time.
+    """
+    heading("AUDIT LOG PIPELINE — audit_logs TABLE AS STORED ON DISK")
+    rows = conn.execute(
+        """
+        SELECT timestamp, event_type, actor_id, resource_id, action, decision, reason, detail
+        FROM audit_logs ORDER BY timestamp
+        """
+    ).fetchall()
+    if not rows:
+        print("  (no audit events recorded)")
+        return
+
+    print(f"  {len(rows)} structured events. Redacted markers are highlighted with <<< >>>.\n")
+    header = f"  {'TIME':8} | {'EVENT_TYPE':16} | {'ACTOR':22} | {'ACTION':16} | DECISION"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for row in rows:
+        ts = row["timestamp"][11:19]  # HH:MM:SS
+        actor = (row["actor_id"] or "-")[:22]
+        print(
+            f"  {ts:8} | {row['event_type']:16} | {actor:22} | {row['action']:16} | {row['decision']}"
+        )
+        detail = json.dumps(json.loads(row["detail"]), indent=None)
+        if len(detail) > 100:
+            detail = detail[:100] + "...}"
+        detail = detail.replace("[REDACTED_SENSITIVE_DATA]", "<<<[REDACTED_SENSITIVE_DATA]>>>")
+        detail = detail.replace("[REDACTED_JWT]", "<<<[REDACTED_JWT]>>>")
+        detail = detail.replace("[REDACTED_EMAIL]", "<<<[REDACTED_EMAIL]>>>")
+        print(f"           detail: {detail}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description="cloudappsecurity interactive security demo")
+    parser.add_argument(
+        "--audit-log",
+        action="store_true",
+        help="After the scenarios run, print the stored audit_logs table showing redaction at rest",
+    )
+    args = parser.parse_args()
+
     print(BAR)
     print("  Cloud Application Security Demo: Multi-Tenant Mobile Backend on AWS")
     print("  Case Study Vehicle: Synthetic Fitness Log Application")
     print(BAR)
 
     # Setup database connection
-    db_file = "/Users/shishir/cloudappsecurity/demo_db.sqlite"
+    db_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), "demo_db.sqlite")
     if os.path.exists(db_file):
         try:
             os.remove(db_file)
@@ -88,6 +134,26 @@ def main():
     print("  Attacker replays a previously captured expired OIDC token.")
     a4 = scenarios.execute_attack_4_expired_token()
     item_good("Verification Result", a4)
+
+    # 5b. Workload Identity (service-to-service)
+    section("FLOW 3 — Workload Identity Token Exchange (STS / SPIFFE style)")
+    print("  Backend import worker attests to the identity broker and receives a")
+    print("  short-lived, scoped service token; the internal API verifies provenance.")
+    f3 = scenarios.execute_flow_3_workload_identity()
+    item_good("Legit Worker Call", f3["legit"])
+    item_good("Unregistered Workload", f3["unregistered"])
+    item_good("Scope Escalation", f3["escalation"])
+    item_good("Stolen User Token Replay", f3["confused_deputy"])
+
+    # 5c. Policy-as-code authorization
+    section("FLOW 4 — Policy-as-Code Authorization (OPA / Rego style)")
+    print("  Access decisions come from a policy engine evaluating structured JSON")
+    print("  policies against an input document — not hand-rolled conditionals.")
+    f4 = scenarios.execute_flow_4_policy_engine(conn)
+    d = f4["allowed_decision"]
+    item_good("Owner Read Decision", f"ALLOW via policy '{d['policy_id']}'")
+    item_good("Cross-Tenant Read", f4["denied_read"])
+    item_good("Cross-Tenant Delete", f4["denied_write"])
 
     # -------------------------------------------------------------------------
     heading("PHASE 2: WEARABLE DATA INGESTION & TRANSACTION INTEGRITY")
@@ -145,6 +211,37 @@ def main():
     for alert in a10:
         item_good("Anomaly Engine Alert", f"[{alert['alert']}] Severity: {alert['severity']} -> {alert['recommendation']}")
 
+    # 13. Automated containment
+    section("ATTACK 11 — Incident Response: Automated Session Containment")
+    print("  A compromised account bulk-exports data. The anomaly alert triggers a")
+    print("  containment hook that revokes the user's sessions server-side, so the")
+    print("  attacker's still-valid JWT is rejected on the very next request.")
+    a11 = scenarios.execute_attack_11_containment(conn)
+    item_bad("Before Containment", a11["pre_status"])
+    alert = a11["alert"]
+    item_good("Anomaly Engine Alert", f"[{alert['alert']}] Severity: {alert['severity']}")
+    for action in alert.get("containment_actions", []):
+        item_good(
+            "Containment Hook",
+            f"{action['action']} for '{action['user_id']}' ({action['sessions_revoked']} session(s) revoked)",
+        )
+    item_good("Gateway Deny-List", a11["gateway_status"])
+    item_good("App Session Gate", a11["post_status"])
+
+    # 14. Nested BOLA on child resources
+    section("ATTACK 12 — Nested BOLA: Parent Protected, Child Probed")
+    print("  Alice is blocked from Bob's workout, so she requests its child record")
+    print("  directly (/sets/wst_bob_1). The child has no user_id column — only a")
+    print("  join to the parent's owner can authorize it.")
+    a12 = scenarios.execute_attack_12_nested_bola(conn)
+    item_bad("Insecure Child Fetch", f"Leaked set: {a12['insecure_result']}")
+    item_good("Secure Child Fetch", a12["secure_error"])
+    item_good("Owner Child Fetch", f"ALLOWED: {a12['own_set']['exercise_name']} set {a12['own_set']['set_number']}")
+
+    # Optional: visualize the audit_logs table before teardown
+    if args.audit_log:
+        print_audit_log(conn)
+
     conn.close()
     if os.path.exists(db_file):
         try:
@@ -153,6 +250,8 @@ def main():
             pass
     print(BAR)
     print("  Demo Complete.")
+    if not args.audit_log:
+        print("  Tip: re-run with --audit-log to inspect the redacted audit trail as stored.")
     print(BAR)
 
 
